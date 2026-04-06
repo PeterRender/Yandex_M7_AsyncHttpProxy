@@ -14,7 +14,7 @@ endif()
 set(CMAKE_PREFIX_PATH /usr/local/asio)
 
 # Ищем необходимые библиотеки
-find_package(Boost REQUIRED)
+find_package(Boost REQUIRED COMPONENTS url)
 find_package(GTest REQUIRED)
 file(GLOB HEADER_FILES "${CMAKE_SOURCE_DIR}/include/*.hpp")
 
