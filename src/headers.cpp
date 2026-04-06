@@ -1,5 +1,6 @@
 #include "headers.h"
 
+#include <charconv>  // для std::from_chars
 #include <ranges>
 #include <string_view>
 
@@ -85,7 +86,7 @@ std::optional<HostPort> findHostPort(std::string_view req) {
         if (parsed->has_port()) {
             std::string_view port_view = parsed->port();
             if (port_view.empty()) {
-                return false;  // порт ожидается, но не задан
+                return false;  // порт ожидается, но не задан - остановка итерации
             }
             port = port_view;
         }
@@ -103,6 +104,42 @@ std::optional<HostPort> findHostPort(std::string_view req) {
     return result;
 }
 
+// Извлекает значение Content-Length из HTTP-ответа
 std::optional<size_t> findContentLength(std::string_view rsp) {
-    return std::nullopt;  // заглушка
+    std::optional<size_t> result;  // по умолчанию std::nullopt (Content-Length еще не найден)
+
+    // Лямбда для обработки заголовка Content-Length
+    auto process_content_length = [&](std::string_view header_name, std::string_view header_value) -> bool {
+        // Проверяем, что у заголовка имя Content-Length (без учета регистра)
+        if (boost::urls::grammar::ci_compare(header_name, "Content-Length") != 0) {
+            return true;  // это не Content-Length, продолжаем итерации
+        }
+
+        // Проверяем, что заголовок Content-Length один (по стандарту HTTP) и имеет значение
+        if (result.has_value() || header_value.empty()) {
+            return false;  // невалидный HTTP-ответ, остановка итерации
+        }
+
+        // Преобразуем значение Content-Length в число
+        size_t length = 0;  // беззнаковый, чтобы std::from_chars отбраковывала "-" значения
+        const char *start = header_value.data();
+        const char *end = start + header_value.size();
+        auto [ptr, ec] = std::from_chars(start, end, length);
+
+        // Проверяем, что парсинг прошел без ошибок и нет лишних символов после цифр
+        if (ec != std::errc() || ptr != end) {
+            return false;  // невалидное значение Content-Length, остановка итерации
+        }
+
+        result = length;  // успех, сохраняем результат
+        return true;      // продолжаем итерации, чтобы проверить дубликаты
+    };
+
+    // Запускаем итерацию по заголовкам
+    if (!iterHeaders(rsp, process_content_length)) {
+        return std::nullopt;  // ошибка обработки заголовка (дубликат или невалидное значение)
+    }
+
+    // Возвращаем длину, если Content-Length найден и валиден, иначе - std::nullopt
+    return result;
 }

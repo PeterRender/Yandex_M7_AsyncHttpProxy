@@ -5,20 +5,28 @@
 #include <utility>
 #include <vector>
 
-// Структура, описывающая тестовый случай для iterHeaders
+// Тестовый случай для iterHeaders
 struct IterHeadersTestCase {
     std::string name;                                           // имя теста
     std::string_view request;                                   // HTTP-запрос/ответ
     std::vector<std::pair<std::string, std::string>> expected;  // ожидаемые заголовки
 };
 
-// Структура, описывающая тестовый случай для findHostPort
+// Тестовый случай для findHostPort
 struct FindHostPortTestCase {
     std::string name;           // имя теста
     std::string_view request;   // HTTP-запрос
     bool expected_result;       // ожидаемый результат (успех/ошибка)
     std::string expected_host;  // ожидаемый хост (если успех)
     std::string expected_port;  // ожидаемый порт (если успех)
+};
+
+// Тестовый случай для findContentLength
+struct FindContentLengthTestCase {
+    std::string name;           // имя теста
+    std::string_view response;  // HTTP-ответ
+    bool expected_result;       // ожидаемый результат (успех/ошибка)
+    size_t expected_value;      // ожидаемое значение (если успех)
 };
 
 // Тестовые данные для iterHeaders
@@ -48,11 +56,12 @@ const std::vector<IterHeadersTestCase> iterHeadersTests = {
 
 // Тестовые данные для findHostPort
 const std::vector<FindHostPortTestCase> findHostPortTests = {
+    // Успешные случаи
     {"Simple", "GET / HTTP/1.1\r\nHost: ya.ru\r\n\r\n", true, "ya.ru", "80"},
     {"WithPort", "GET / HTTP/1.1\r\nHost: yandex.ru:8080\r\n\r\n", true, "yandex.ru", "8080"},
     {"WithSpaces", "GET / HTTP/1.1\r\nHost:   ya.ru:80  \r\n\r\n", true, "ya.ru", "80"},
-    {"LowercaseHost", "GET / HTTP/1.1\r\nhost: yandex.ru\r\n\r\n", true, "yandex.ru", "80"},
-    {"MixedCaseHost", "GET / HTTP/1.1\r\nHoSt: Ya.Ru\r\n\r\n", true, "Ya.Ru", "80"},
+    {"LowerCase", "GET / HTTP/1.1\r\nhost: yandex.ru\r\n\r\n", true, "yandex.ru", "80"},
+    {"MixedCase", "GET / HTTP/1.1\r\nHoSt: Ya.Ru\r\n\r\n", true, "Ya.Ru", "80"},
     {"IPv6Address", "GET / HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n", true, "[::1]", "8080"},
     {"IPv6Yandex", "GET / HTTP/1.1\r\nHost: [2a02:6b8::1]:8080\r\n\r\n", true, "[2a02:6b8::1]", "8080"},
 
@@ -63,6 +72,26 @@ const std::vector<FindHostPortTestCase> findHostPortTests = {
     {"InvalidPortFormat", "GET / HTTP/1.1\r\nHost: ya.ru:abc\r\n\r\n", false, "", ""},
     {"InvalidEmptyPort", "GET / HTTP/1.1\r\nHost: ya.ru:\r\n\r\n", false, "", ""},
     {"NamelessHostWithPort", "GET / HTTP/1.1\r\nHost: :8080\r\n\r\n", false, "", ""},
+};
+
+// Тестовые данные для findContentLength
+const std::vector<FindContentLengthTestCase> findContentLengthTests = {
+    // Успешные случаи
+    {"Simple", "HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n", true, 4096},
+    {"LargeNumber", "HTTP/1.1 200 OK\r\nContent-Length: 1234567\r\n\r\n", true, 1234567},
+    {"WithSpaces", "HTTP/1.1 200 OK\r\nContent-Length:   512  \r\n\r\n", true, 512},
+    {"LowerCase", "HTTP/1.1 200 OK\r\ncontent-length: 1024\r\n\r\n", true, 1024},
+    {"MixedCase", "HTTP/1.1 200 OK\r\nContent-LENGTH: 2048\r\n\r\n", true, 2048},
+    {"ZeroValue", "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", true, 0},
+
+    // Ошибочные случаи
+    {"NoContentLength", "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n", false, 0},
+    {"EmptyValue", "HTTP/1.1 200 OK\r\nContent-Length:\r\n\r\n", false, 0},
+    {"InvalidNumber", "HTTP/1.1 200 OK\r\nContent-Length: qwe\r\n\r\n", false, 0},
+    {"ExtraCharsAfter", "HTTP/1.1 200 OK\r\nContent-Length: 1234567qwe\r\n\r\n", false, 0},
+    {"MultipleContentLength", "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Length: 200\r\n\r\n", false, 0},
+    {"NegativeLength", "HTTP/1.1 200 OK\r\nContent-Length: -10\r\n\r\n", false, 0},
+    {"FloatLength", "HTTP/1.1 200 OK\r\nContent-Length: 10.5\r\n\r\n", false, 0},
 };
 
 // Собирает распарсенные HTTP-заголовки в вектор пар "имя, значение"
@@ -78,7 +107,7 @@ std::vector<std::pair<std::string, std::string>> gatherHeaders(std::string_view 
 // Параметрический тест функции iterHeaders
 class IterHeadersTest : public ::testing::TestWithParam<IterHeadersTestCase> {};
 
-TEST_P(IterHeadersTest, ParseHeaders) {
+TEST_P(IterHeadersTest, IterHeaders) {
     const auto &test = GetParam();
     auto headers = gatherHeaders(test.request);
     EXPECT_EQ(headers.size(), test.expected.size());
@@ -115,10 +144,21 @@ TEST_P(FindHostPortTest, FindHostPort) {
 INSTANTIATE_TEST_SUITE_P(FindHostPortTestSuite, FindHostPortTest, ::testing::ValuesIn(findHostPortTests),
                          [](const testing::TestParamInfo<FindHostPortTestCase> &info) { return info.param.name; });
 
-TEST(findContentLength, Simple) {
-    // code here
+// Параметрический тест функции findContentLength
+class FindContentLengthTest : public ::testing::TestWithParam<FindContentLengthTestCase> {};
+
+TEST_P(FindContentLengthTest, FindContentLength) {
+    const auto &test = GetParam();
+    auto result = findContentLength(test.response);
+
+    if (test.expected_result) {
+        ASSERT_TRUE(result.has_value()) << "Test: " << test.name;
+        EXPECT_EQ(*result, test.expected_value) << "Test: " << test.name;
+    } else {
+        EXPECT_FALSE(result.has_value()) << "Test: " << test.name;
+    }
 }
 
-TEST(findContentLength, NoContentLength) {
-    // code here
-}
+// Набор тестов для функции findContentLength
+INSTANTIATE_TEST_SUITE_P(FindContentLengthTestSuite, FindContentLengthTest, ::testing::ValuesIn(findContentLengthTests),
+                         [](const testing::TestParamInfo<FindContentLengthTestCase> &info) { return info.param.name; });

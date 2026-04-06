@@ -17,4 +17,5 @@ bool iterHeaders(std::string_view req, Callback &&callback);
 // Извлекает пару {имя хоста, порт} из HTTP-запроса
 std::optional<HostPort> findHostPort(std::string_view req);
 
+// Извлекает значение Content-Length из HTTP-ответа
 std::optional<size_t> findContentLength(std::string_view rsp);
