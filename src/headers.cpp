@@ -9,12 +9,11 @@
 
 using namespace std::string_view_literals;
 
-using Callback = std::function<void(std::string_view, std::string_view)>;
-
-// Извлекает из HTTP-запроса/ответа заголовки в формате {имя, значение} и передает их в колбэк
-void iterHeaders(std::string_view req, Callback &&callback) {
+// Обрабатывает все заголовки HTTP-запроса/ответа с помощью колбэк-функции
+// (true - все заголовки успешно обработаны, false - есть ошибка обработки заголовка)
+bool iterHeaders(std::string_view req, Callback &&callback) {
     // Разбиваем HTTP-запрос/ответ на строки
-    auto all_lines = req | std::views::split(std::string_view("\r\n"));
+    auto all_lines = req | std::views::split("\r\n"sv);
 
     // Обрабатываем строки до первой пустой строки
     for (auto line : all_lines) {
@@ -22,7 +21,7 @@ void iterHeaders(std::string_view req, Callback &&callback) {
 
         // Пустая строка означает конец секции заголовков (по стандарту - это "\r\n\r\n")
         if (line_str.empty()) {
-            break;
+            break;  // нет строк для обработки, останавливаем итерацию
         }
 
         // Пропускаем строки без двоеточия (первая строка запроса/статуса, невалидные заголовки)
@@ -44,57 +43,64 @@ void iterHeaders(std::string_view req, Callback &&callback) {
             header_value = header_value.substr(start, end - start + 1);
         }
 
-        // Вызываем колбэк для HTTP-заголовка
-        callback(header_name, header_value);
+        // Обрабатываем заголовок с помощью колбэк-функции
+        if (!callback(header_name, header_value)) {
+            return false;  // ошибка обработки заголовка, останавливаем итерацию
+        }
     }
+
+    return true;  // все заголовки успешно обработаны
 }
 
-// Извлекает имя хоста и номер порта из HTTP-запроса
-std::optional<std::pair<std::string, std::string>> findHostPort(std::string_view req) {
-    std::string host_desc;  // дескриптор хоста в формате "имя_хоста:порт"
-    int host_cnt = 0;       // запрос может иметь только один заголовок Host (по стандарту HTTP)
+// Извлекает пару {имя хоста, порт} из HTTP-запроса
+std::optional<HostPort> findHostPort(std::string_view req) {
+    std::optional<HostPort> result;  // по умолчанию std::nullopt (хост еще не найден)
 
-    // Ищем заголовок Host в HTTP-запросе
-    iterHeaders(req, [&](std::string_view header_name, std::string_view header_value) {
-        // Проверяем, что найден заголовок Host (без учёта регистра, по стандарту HTTP)
-        if (boost::urls::grammar::ci_compare(header_name, "Host") == 0) {
-            host_cnt++;
-            if (host_cnt == 1) {
-                host_desc = header_value;  // запоминаем только первый дескриптор хоста
+    // Лямбда для обработки заголовка Host
+    auto process_host = [&](std::string_view header_name, std::string_view header_value) -> bool {
+        // Проверяем, что у заголовка имя Host (без учета регистра, по стандарту HTTP)
+        if (boost::urls::grammar::ci_compare(header_name, "Host") != 0) {
+            return true;  // это не Host, продолжаем итерации
+        }
+
+        // Проверяем, что заголовок Host один (по стандарту HTTP) и имеет значение
+        if (result.has_value() || header_value.empty()) {
+            return false;  // невалидный HTTP-запрос, остановка итерации
+        }
+
+        // Парсим значение заголовка Host (формат "host:port")
+        auto parsed = boost::urls::parse_authority(header_value);
+        if (!parsed) {
+            return false;  // невалидный формат хоста, остановка итерации
+        }
+
+        // Извлекаем имя хоста
+        std::string host_name(parsed->host());
+        if (host_name.empty()) {
+            return false;  // пустое имя хоста, остановка итерации
+        }
+
+        // Извлекаем порт (по умолчанию "80", стандарт HTTP)
+        std::string port = "80";
+        if (parsed->has_port()) {
+            std::string_view port_view = parsed->port();
+            if (port_view.empty()) {
+                return false;  // порт ожидается, но не задан
             }
-            // последующие дескрипторы хостов (если есть) просто считаем
+            port = port_view;
         }
-    });
 
-    // Дескриптор хоста должен быть одним и непустым
-    if ((host_cnt != 1) || host_desc.empty()) {
-        return std::nullopt;  // невалидный HTTP-запрос
+        result = std::pair{std::move(host_name), std::move(port)};  // успех, сохраняем результат
+        return true;                                                // продолжаем итерации, чтобы проверить дубликаты
+    };
+
+    // Запускаем итерацию по заголовкам
+    if (!iterHeaders(req, process_host)) {
+        return std::nullopt;  // ошибка обработки заголовка (дубликат или невалидный формат)
     }
 
-    // Извлекаем имя хоста и порт из дескриптора хоста
-    auto parsed = boost::urls::parse_authority(host_desc);
-    if (!parsed) {
-        return std::nullopt;  // невалидный формат хоста
-    }
-
-    // Проверяем, что имя хоста непустое
-    std::string host_name(parsed->host());
-    if (host_name.empty()) {
-        return std::nullopt;
-    }
-
-    // Проверяем, что порт задан после разделителя ":"
-    std::string port = "80";  // порт по умолчанию (по стандарту HTTP)
-    if (parsed->has_port()) {
-        std::string_view port_view = parsed->port();
-        if (port_view.empty()) {
-            return std::nullopt;  // порт ожидается, но не задан
-        }
-        port = port_view;
-    }
-
-    // Возвращаем имя хоста и порт
-    return std::pair{std::move(host_name), std::move(port)};
+    // Возвращаем {имя хоста, порт}, если Host найден и валиден, иначе - std::nullopt
+    return result;
 }
 
 std::optional<size_t> findContentLength(std::string_view rsp) {

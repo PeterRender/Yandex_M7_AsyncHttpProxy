@@ -68,7 +68,10 @@ const std::vector<FindHostPortTestCase> findHostPortTests = {
 // Собирает распарсенные HTTP-заголовки в вектор пар "имя, значение"
 std::vector<std::pair<std::string, std::string>> gatherHeaders(std::string_view req) {
     std::vector<std::pair<std::string, std::string>> result;
-    iterHeaders(req, [&](std::string_view name, std::string_view value) { result.emplace_back(name, value); });
+    iterHeaders(req, [&](std::string_view name, std::string_view value) {
+        result.emplace_back(name, value);
+        return true;  // продолжаем итерации
+    });
     return result;
 }
 
