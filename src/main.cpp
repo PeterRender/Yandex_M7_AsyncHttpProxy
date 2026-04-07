@@ -11,6 +11,8 @@
 #include <iostream>
 #include <print>
 #include <string_view>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 using boost::asio::async_read_until;
 using boost::asio::awaitable;
@@ -68,6 +70,11 @@ awaitable<void> forwardBodyByChunks(tcp::socket &server_socket, tcp::socket &cli
 
 // Сопрограмма, реализующая прокси-сессию для одного клиента
 awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
+    // Выводим id процесса и id текущего потока (должны совпадать)
+    static auto pid = getpid();              // id процесса (один раз при первом вызове)
+    auto current_tid = syscall(SYS_gettid);  // id текущего потока
+    std::println("PID: {}, TID: {}", pid, current_tid);
+
     try {
         // 1. Читаем клиентский HTTP-запрос до конца секции заголовков (delimiter)
         std::string client_req;
@@ -81,23 +88,31 @@ awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
         }
         auto [host, port] = *host_port;
 
-        // 3. Устанавливаем TCP-соединение с целевым HTTP-сервером
+        // 3. Проверка на зацикливание (только для локальных подключений)
+        auto local_endpoint = client_socket.local_endpoint();
+        int proxy_port = local_endpoint.port();
+        if ((host == "127.0.0.1" || host == "localhost") && port == std::to_string(proxy_port)) {
+            std::println(stderr, "Recursive proxy request detected, aborting session");
+            co_return;
+        }
+
+        // 4. Устанавливаем TCP-соединение с целевым HTTP-сервером
         auto server_socket = co_await connectToServer(io_service, host, port);
 
-        // 4. Пересылаем клиентский HTTP-запрос целевому HTTP-серверу
+        // 5. Пересылаем клиентский HTTP-запрос целевому HTTP-серверу
         co_await async_write(server_socket, buffer(client_req), use_awaitable);
 
-        // 5. Читаем серверный HTTP-ответ до конца секции заголовков (delimiter)
+        // 6. Читаем серверный HTTP-ответ до конца секции заголовков (delimiter)
         std::string server_rsp;
         co_await async_read_until(server_socket, dynamic_buffer(server_rsp), delimiter, use_awaitable);
 
-        // 6. Пересылаем заголовки серверного HTTP-ответа клиенту
+        // 7. Пересылаем заголовки серверного HTTP-ответа клиенту
         co_await async_write(client_socket, buffer(server_rsp), use_awaitable);
 
-        // 7. Извлекаем длину тела (в байтах) из серверного HTTP-ответа
+        // 8. Извлекаем длину тела (в байтах) из серверного HTTP-ответа
         auto content_length = findContentLength(server_rsp);
 
-        // 8. Пересылаем тело серверного HTTP-ответа (если есть) клиенту по порциям
+        // 9. Пересылаем тело серверного HTTP-ответа (если есть) клиенту по порциям
         if (content_length.has_value() && *content_length > 0) {
             co_await forwardBodyByChunks(server_socket, client_socket, *content_length);
         }
