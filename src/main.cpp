@@ -28,6 +28,9 @@ using boost::system::error_code;
 // Разделитель между HTTP-заголовками и телом сообщения (по стандрату два CRLF)
 constexpr std::string_view delimiter = "\r\n\r\n";
 
+// Max размер секции заголовков HTTP-запроса/ответа (в байтах), обрабатываемый прокси-сервером
+constexpr size_t MAX_HEADERS_SIZE = 65536;
+
 // Размер порции для чтения тела ответа, в байтах
 constexpr size_t CHUNK_SIZE = 8192;
 
@@ -50,21 +53,42 @@ awaitable<tcp::socket> connectToServer(io_service &io_service, const std::string
     }
 }
 
-// Пересылает тело серверного HTTP-ответа клиенту порциями
-awaitable<void> forwardBodyByChunks(tcp::socket &server_socket, tcp::socket &client_socket, size_t content_length) {
+// Пересылает полное HTTP-сообщение (заголовки + тело) от источника к получателю
+awaitable<void> forwardHttpMessage(tcp::socket &src_socket, tcp::socket &dst_socket, const std::string &src_headers,
+                                   size_t src_headers_length) {
+    // Пересылаем получателю только заголовки от источника
+    co_await async_write(dst_socket, buffer(src_headers.data(), src_headers_length), use_awaitable);
+
+    // Извлекаем длину тела HTTP-сообщения (в байтах) из источника
+    auto content_length = findContentLength(src_headers);
+
+    // Проверяем, есть ли тело в HTTP-сообщении
+    if (!content_length.has_value() || (*content_length == 0)) {
+        co_return;  // тела нет, завершаем пересылку сообщения
+    }
+
+    // Вначале пересылаем часть тела, которую прочитали вместе с заголовками (не может превышать длины тела)
+    size_t already_read = std::min(src_headers.size() - src_headers_length, *content_length);
+    if (already_read > 0) {
+        co_await async_write(dst_socket, buffer(src_headers.data() + src_headers_length, already_read), use_awaitable);
+    }
+
+    // Проверяем длину оставшейся части ("хвоста") тела
+    size_t remaining = *content_length - already_read;
+    if (remaining == 0) {
+        co_return;  // все тело уже получено, завершаем пересылку сообщения
+    }
+
+    // Читаем и отправляем "хвост" тела по порциям
     std::array<char, CHUNK_SIZE> chunk;
-    size_t bytes_to_send = content_length;
-
-    while (bytes_to_send > 0) {
-        size_t bytes_to_read = std::min(CHUNK_SIZE, bytes_to_send);
-
+    while (remaining > 0) {
+        size_t bytes_to_read = std::min(CHUNK_SIZE, remaining);
         size_t n =
-            co_await async_read(server_socket, buffer(chunk.data(), bytes_to_read),
+            co_await async_read(src_socket, buffer(chunk.data(), bytes_to_read),
                                 transfer_at_least(1),  // не возвращать управление, пока не считается хотя бы 1 байт
                                 use_awaitable);
-
-        co_await async_write(client_socket, buffer(chunk.data(), n), use_awaitable);
-        bytes_to_send -= n;
+        co_await async_write(dst_socket, buffer(chunk.data(), n), use_awaitable);
+        remaining -= n;
     }
 }
 
@@ -76,9 +100,10 @@ awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
     std::println("PID: {}, TID: {}", pid, current_tid);
 
     try {
-        // 1. Читаем клиентский HTTP-запрос до конца секции заголовков (delimiter)
+        // 1. Читаем клиентский HTTP-запрос до конца секции заголовков (может захватить часть тела после разделителя)
         std::string client_req;
-        co_await async_read_until(client_socket, dynamic_buffer(client_req), delimiter, use_awaitable);
+        size_t req_headers_length = co_await async_read_until(
+            client_socket, dynamic_buffer(client_req, MAX_HEADERS_SIZE), delimiter, use_awaitable);
 
         // 2. Извлекаем пару {имя хоста, порт} из HTTP-запроса
         auto host_port = findHostPort(client_req);
@@ -99,23 +124,16 @@ awaitable<void> session(tcp::socket client_socket, io_service &io_service) {
         // 4. Устанавливаем TCP-соединение с целевым HTTP-сервером
         auto server_socket = co_await connectToServer(io_service, host, port);
 
-        // 5. Пересылаем клиентский HTTP-запрос целевому HTTP-серверу
-        co_await async_write(server_socket, buffer(client_req), use_awaitable);
+        // 5. Пересылаем полный HTTP-запрос клиента серверу (заголовки + тело)
+        co_await forwardHttpMessage(client_socket, server_socket, client_req, req_headers_length);
 
-        // 6. Читаем серверный HTTP-ответ до конца секции заголовков (delimiter)
+        // 6. Читаем серверный HTTP-ответ до конца секции заголовков (может захватить часть тела после разделителя)
         std::string server_rsp;
-        co_await async_read_until(server_socket, dynamic_buffer(server_rsp), delimiter, use_awaitable);
+        size_t rsp_headers_length = co_await async_read_until(
+            server_socket, dynamic_buffer(server_rsp, MAX_HEADERS_SIZE), delimiter, use_awaitable);
 
-        // 7. Пересылаем заголовки серверного HTTP-ответа клиенту
-        co_await async_write(client_socket, buffer(server_rsp), use_awaitable);
-
-        // 8. Извлекаем длину тела (в байтах) из серверного HTTP-ответа
-        auto content_length = findContentLength(server_rsp);
-
-        // 9. Пересылаем тело серверного HTTP-ответа (если есть) клиенту по порциям
-        if (content_length.has_value() && *content_length > 0) {
-            co_await forwardBodyByChunks(server_socket, client_socket, *content_length);
-        }
+        // 7. Пересылаем полный HTTP-ответ сервера клиенту (заголовки + тело)
+        co_await forwardHttpMessage(server_socket, client_socket, server_rsp, rsp_headers_length);
     } catch (const std::exception &e) {
         std::println(stderr, "Session failed: {}", e.what());
     }

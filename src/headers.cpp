@@ -10,6 +10,10 @@
 
 using namespace std::string_view_literals;
 
+constexpr std::string_view DEFAULT_HTTP_PORT = "80"sv;                       // порт по умолчанию (стандарт HTTP)
+constexpr std::string_view HOST_HEADER_NAME = "Host"sv;                      // имя заголовка хоста
+constexpr std::string_view CONTENT_LENGTH_HEADER_NAME = "Content-Length"sv;  // имя заголовка длины тела
+
 // Обрабатывает все заголовки HTTP-запроса/ответа с помощью колбэк-функции
 // (true - все заголовки успешно обработаны, false - есть ошибка обработки заголовка)
 bool iterHeaders(std::string_view req, Callback &&callback) {
@@ -60,7 +64,7 @@ std::optional<HostPort> findHostPort(std::string_view req) {
     // Лямбда для обработки заголовка Host
     auto process_host = [&](std::string_view header_name, std::string_view header_value) -> bool {
         // Проверяем, что у заголовка имя Host (без учета регистра, по стандарту HTTP)
-        if (boost::urls::grammar::ci_compare(header_name, "Host") != 0) {
+        if (boost::urls::grammar::ci_compare(header_name, HOST_HEADER_NAME) != 0) {
             return true;  // это не Host, продолжаем итерации
         }
 
@@ -81,8 +85,8 @@ std::optional<HostPort> findHostPort(std::string_view req) {
             return false;  // пустое имя хоста, остановка итерации
         }
 
-        // Извлекаем порт (по умолчанию "80", стандарт HTTP)
-        std::string port = "80";
+        // Извлекаем порт
+        std::string port{DEFAULT_HTTP_PORT};
         if (parsed->has_port()) {
             std::string_view port_view = parsed->port();
             if (port_view.empty()) {
@@ -111,7 +115,7 @@ std::optional<size_t> findContentLength(std::string_view rsp) {
     // Лямбда для обработки заголовка Content-Length
     auto process_content_length = [&](std::string_view header_name, std::string_view header_value) -> bool {
         // Проверяем, что у заголовка имя Content-Length (без учета регистра)
-        if (boost::urls::grammar::ci_compare(header_name, "Content-Length") != 0) {
+        if (boost::urls::grammar::ci_compare(header_name, CONTENT_LENGTH_HEADER_NAME) != 0) {
             return true;  // это не Content-Length, продолжаем итерации
         }
 
